@@ -39,6 +39,17 @@ const makeBloom = () => {
 
 const fwd = new THREE.Vector3(), fpt = new THREE.Vector3();
 
+/** Dispose an effect/pass from an unmount cleanup — but NEVER let cleanup kill a frame.
+ *  R3F applies the `dispose={null}` JSX prop onto primitive objects, which nulls their
+ *  dispose() method; the old unguarded `fx.ink.dispose()` cleanup therefore threw
+ *  "fx.ink.dispose is not a function" at every crossfade-end unmount (frames 1137, 1307,
+ *  1415, 1624, 1739, 1867 — GitHub Actions run #1, chunks 5-7). Guard + try/catch always. */
+const safeDispose = (o: { dispose?: unknown }) => {
+  if (o && typeof o.dispose === "function") {
+    try { (o.dispose as () => void).call(o); } catch { /* cleanup must never fail a frame */ }
+  }
+};
+
 const useKit = () => {
   const [kit, setKit] = useState<Kit | null>(null);
   const [handle] = useState(() => delayRender("bridge kit"));
@@ -60,16 +71,19 @@ const Inner: React.FC<{ id: number; kit: Kit }> = ({ id, kit }) => {
     grade: new GradeEffect(GRADES.day, GRADE_STRENGTH.day),
     grain: new GrainEffect({ amount: 0.025, cellPx: 1.5 }), // film grain, OFF by default (inputProps post.grain): the reference measures no grain and it quadruples the file size
   }), [camera, scene]);
-  useEffect(() => () => fx.ink.dispose(), [fx]);
+  useEffect(() => () => {
+    safeDispose(fx.ink); safeDispose(fx.lens); safeDispose(fx.bloom);
+    safeDispose(fx.tone); safeDispose(fx.grade); safeDispose(fx.grain);
+  }, [fx]);
   const post = useMemo(() => (
     <EffectComposer multisampling={4}>
-      {on.ink ? <primitive object={fx.ink} dispose={null} /> : null}
-      {on.lens && on.pre ? <primitive object={fx.lens.pre} dispose={null} /> : null}
-      {on.lens ? <primitive object={fx.lens.main} dispose={null} /> : null}
-      {on.bloom ? <primitive object={fx.bloom} dispose={null} /> : null}
-      <primitive object={fx.tone} dispose={null} />
-      {on.grade ? <primitive object={fx.grade} dispose={null} /> : null}
-      {on.grain ? <primitive object={fx.grain} dispose={null} /> : null}
+      {on.ink ? <primitive object={fx.ink} /> : null}
+      {on.lens && on.pre ? <primitive object={fx.lens.pre} /> : null}
+      {on.lens ? <primitive object={fx.lens.main} /> : null}
+      {on.bloom ? <primitive object={fx.bloom} /> : null}
+      <primitive object={fx.tone} />
+      {on.grade ? <primitive object={fx.grade} /> : null}
+      {on.grain ? <primitive object={fx.grain} /> : null}
     </EffectComposer>
   ), [fx, on]);
   const cam = camera as THREE.PerspectiveCamera;
