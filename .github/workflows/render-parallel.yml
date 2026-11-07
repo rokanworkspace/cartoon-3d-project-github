@@ -1,0 +1,118 @@
+# Parallel BridgeShort render on GitHub Actions — FREE breakthrough route.
+#
+# Idea: the render bottleneck is one slow machine drawing 2,025 frames.
+# GitHub gives every repo a fleet of throwaway machines. This workflow splits
+# the video into the same 8 chunks as scripts/render-full-chunks.sh and draws
+# them SIMULTANEOUSLY on 8 separate runners, then a merge job stitches the
+# chunks into one silent picture track (mux the audio locally afterwards,
+# exactly like the local chunk script does):
+#   ffmpeg -i video.mp4 -i ../bridge-short/audio/mix.wav \
+#     -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k final.mp4
+#
+# Cost: $0 on a PUBLIC repo (standard runners are free there).
+# On a PRIVATE repo it burns Actions minutes: 8 render jobs + 1 merge job.
+# Free private allowance is 2,000 min/month — one full render roughly fits,
+# but public is the safe default for repeated renders.
+#
+# WebGL note: runners have no GPU, so frames are drawn with SwiftShader
+# (--gl swangle), same as the local VM — the win here is parallelism,
+# not per-frame speed. Expected wall-clock: well under ~1 h for all chunks
+# (estimate from 4 vCPU / 16 GB runners; measure on first run).
+#
+# Trigger: Actions tab -> "Render BridgeShort (parallel)" -> Run workflow.
+
+name: Render BridgeShort (parallel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Chromium concurrency per runner (2 is safe for 16 GB runners)"
+        required: false
+        default: "2"
+
+jobs:
+  render:
+    name: Chunk ${{ matrix.chunk }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { chunk: 1, frames: "0-269" }
+          - { chunk: 2, frames: "270-539" }
+          - { chunk: 3, frames: "540-809" }
+          - { chunk: 4, frames: "810-1079" }
+          - { chunk: 5, frames: "1080-1349" }
+          - { chunk: 6, frames: "1350-1619" }
+          - { chunk: 7, frames: "1620-1889" }
+          - { chunk: 8, frames: "1890-2024" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Chromium system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libasound2t64 libpango-1.0-0 libcairo2 \
+            libatspi2.0-0 libgtk-3-0 ffmpeg
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Render chunk ${{ matrix.chunk }} (frames ${{ matrix.frames }})
+        run: |
+          mkdir -p out/chunks
+          npx remotion render src/index.ts BridgeShort \
+            "out/chunks/chunk_${{ matrix.chunk }}.mp4" \
+            --codec h264 --crf 16 \
+            --frames="${{ matrix.frames }}" \
+            --gl swangle \
+            --concurrency "${{ inputs.concurrency }}" \
+            --timeout 600000
+
+      - name: Upload chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: out/chunks/chunk_${{ matrix.chunk }}.mp4
+          retention-days: 7
+
+  merge:
+    name: Merge chunks into silent picture
+    needs: render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: chunks
+          merge-multiple: true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Concatenate chunks (same codec, stream copy)
+        run: |
+          ls -1 chunks/chunk_*.mp4 | sort -V | while read -r f; do
+            echo "file '$PWD/$f'"
+          done > list.txt
+          cat list.txt
+          ffmpeg -y -v error -f concat -safe 0 -i list.txt -c copy bridge-video-silent.mp4
+
+      - name: Upload silent picture
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-video-silent
+          path: bridge-video-silent.mp4
+          retention-days: 7
